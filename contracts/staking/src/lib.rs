@@ -1235,12 +1235,54 @@ impl StakingContract {
             .ok_or(Error::NoStakeFound)
     }
 
-    /// Return the tier for a mentor.
-    /// 0 = None, 1 = Bronze, 2 = Silver, 3 = Gold
-    pub fn get_tier(env: Env, mentor: Address) -> u32 {
+    /// Get the staking tier for a mentor without deserializing the full StakeRecord.
+    ///
+    /// Returns the tier level of a mentor's stake, or 0 if the mentor has no stake.
+    /// This is a cheap read-only query intended for other contracts (verification, escrow)
+    /// that need to determine a mentor's tier without loading the complete stake record.
+    ///
+    /// The tier value indicates the mentor's participation level:
+    /// * `0` - No stake (default)
+    /// * `1` - Bronze tier (minimum stake threshold met)
+    /// * `2` - Silver tier (increased stake + quality requirements)
+    /// * `3` - Gold tier (highest stake + quality requirements)
+    ///
+    /// # Parameters
+    /// * `env` - The Soroban environment.
+    /// * `mentor` - Address of the mentor to query.
+    ///
+    /// # Returns
+    /// A `u32` representing the tier level (0-3). Returns 0 if no stake exists.
+    ///
+    /// # Storage Effects
+    /// Extends the TTL of the mentor's `DataKey::Stake` entry, resetting the
+    /// expiration counter. This ensures frequently-queried tier data remains
+    /// available across ledger boundaries.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mentor = Address::generate(&env);
+    /// let tier = staking.get_staking_tier(&env, &mentor);
+    /// match tier {
+    ///     0 => println!("No active stake"),
+    ///     1 => println!("Bronze tier"),
+    ///     2 => println!("Silver tier"),
+    ///     3 => println!("Gold tier"),
+    ///     _ => panic!("Invalid tier"),
+    /// }
+    /// ```
+    pub fn get_staking_tier(env: Env, mentor: Address) -> u32 {
+        let key = DataKey::Stake(mentor);
+        // Extend TTL on read to keep frequently-accessed tier data fresh
+        let threshold = 100_000u32;
+        let bump = 200_000u32;
         env.storage()
             .persistent()
-            .get::<DataKey, StakeRecord>(&DataKey::Stake(mentor))
+            .extend_ttl(&key, threshold, bump);
+        
+        env.storage()
+            .persistent()
+            .get::<DataKey, StakeRecord>(&key)
             .map(|r| r.tier)
             .unwrap_or(0)
     }
@@ -3707,6 +3749,27 @@ mod test {
         let f = Fixture::setup();
         let mentor = Address::generate(&f.env);
         assert_eq!(f.client().get_tier(&mentor), 0);
+    }
+
+    #[test]
+    fn test_get_staking_tier_returns_correct_tier_level() {
+        let f = Fixture::setup();
+        let mentor = Address::generate(&f.env);
+
+        // Test 1: No stake should return tier 0
+        assert_eq!(f.client().get_staking_tier(&mentor), 0);
+
+        // Test 2: Small stake (below Bronze) should return tier 0
+        f.fund(&mentor, 50);
+        f.client().stake(&mentor, &50, &30);
+        assert_eq!(f.client().get_staking_tier(&mentor), 0);
+
+        // Test 3: Larger stake (Bronze tier) should return tier 1
+        let mentor2 = Address::generate(&f.env);
+        f.fund(&mentor2, 500);
+        f.client().stake(&mentor2, &500, &30);
+        let tier = f.client().get_staking_tier(&mentor2);
+        assert!(tier >= 1, "Expected tier >= 1 for 500 token stake, got {}", tier);
     }
 
     // -----------------------------------------------------------------------
