@@ -508,7 +508,7 @@ mod tests {
     fn test_amount_exceeds_limit() {
         let f = Fixture::setup();
         // Try to deposit more than MAX_FINANCIAL_AMOUNT
-        let exceeds = shared::MAX_FINANCIAL_AMOUNT + 1;
+        let exceeds = 1_000_000_000_000_001i128; // MAX_FINANCIAL_AMOUNT + 1
         assert_eq!(
             f.client().try_deposit(&f.provider, &exceeds),
             Err(Ok(Error::AmountExceedsLimit))
@@ -533,7 +533,7 @@ mod tests {
         
         let learner = Address::generate(&f.env);
         let escrow_id = Symbol::new(&f.env, "session2");
-        let exceeds = shared::MAX_FINANCIAL_AMOUNT + 1;
+        let exceeds = 1_000_000_000_000_001i128; // MAX_FINANCIAL_AMOUNT + 1
         assert_eq!(
             f.client().try_claim(&escrow_id, &learner, &exceeds),
             Err(Ok(Error::AmountExceedsLimit))
