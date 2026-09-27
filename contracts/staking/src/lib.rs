@@ -1,7 +1,11 @@
 #![no_std]
 #![allow(deprecated)] // Temporarily allow deprecated Events::publish until we migrate to #[contractevent]
 
-use shared::events::{emit_staking_event, evt_staking_staked, evt_staking_unstaked};
+use shared::events::{
+    emit_staking_event, evt_staking_staked, evt_staking_unstaked, evt_staking_admin_proposed,
+    evt_staking_admin_accepted, evt_staking_admin_cancelled, AdminChangeProposedEvent,
+    AdminChangeAcceptedEvent, AdminChangeCancelledEvent,
+};
 use shared::health_reporter::{report_metric, MetricCategory};
 use shared::pause_guard::require_not_paused;
 use shared::{
@@ -454,8 +458,10 @@ impl StakingContract {
                 effective_at,
             },
         );
-        env.events().publish(
-            (Symbol::new(&env, "admin"), Symbol::new(&env, "proposed")),
+        // Emit AdminChangeProposed event via shared event infrastructure
+        emit_staking_event(
+            &env,
+            evt_staking_admin_proposed(&env),
             AdminChangeProposedEvent {
                 contract: env.current_contract_address(),
                 old_admin,
@@ -479,17 +485,40 @@ impl StakingContract {
         if env.ledger().timestamp() < pending.effective_at {
             return Err(Error::AdminChangeNotYetEffective);
         }
+        let old_admin = Self::admin(&env)?;
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
+        // Emit AdminChangeAccepted event via shared event infrastructure
+        emit_staking_event(
+            &env,
+            evt_staking_admin_accepted(&env),
+            AdminChangeAcceptedEvent {
+                contract: env.current_contract_address(),
+                old_admin,
+                new_admin,
+            },
+        );
         Ok(())
     }
 
     pub fn cancel_admin_change(env: Env, multisig: Address) -> Result<(), Error> {
         multisig.require_auth();
-        if !env.storage().instance().has(&DataKey::PendingAdmin) {
-            return Err(Error::NoPendingAdminChange);
-        }
+        let pending: PendingAdminChange = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(Error::NoPendingAdminChange)?;
         env.storage().instance().remove(&DataKey::PendingAdmin);
+        // Emit AdminChangeCancelled event via shared event infrastructure
+        emit_staking_event(
+            &env,
+            evt_staking_admin_cancelled(&env),
+            AdminChangeCancelledEvent {
+                contract: env.current_contract_address(),
+                cancelled_by: multisig,
+                cancelled_new_admin: pending.new_admin,
+            },
+        );
         Ok(())
     }
 
@@ -4172,5 +4201,62 @@ mod test {
                 .unwrap()
         });
         assert_eq!(index, existing);
+    }
+
+    // -----------------------------------------------------------------------
+    // Admin change events
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_propose_admin_change_emits_event() {
+        let f = Fixture::setup();
+        let new_admin = Address::generate(&f.env);
+
+        f.client().propose_admin_change(&f.admin, &new_admin);
+
+        let events = f.env.events().all();
+        let event = events.last().unwrap();
+        
+        // Verify event has correct topic structure (contract, version, event_type)
+        let topics = &event.topics;
+        assert_eq!(topics.len(), 3);
+    }
+
+    #[test]
+    fn test_accept_admin_change_emits_event() {
+        let f = Fixture::setup();
+        let new_admin = Address::generate(&f.env);
+
+        f.client().propose_admin_change(&f.admin, &new_admin);
+        
+        // Advance time to make the change effective
+        f.env.ledger().set_timestamp(f.env.ledger().timestamp() + ADMIN_CHANGE_TIMELOCK + 1);
+
+        f.client().accept_admin_change(&new_admin);
+
+        let events = f.env.events().all();
+        let event = events.last().unwrap();
+        
+        // Verify event has correct topic structure
+        let topics = &event.topics;
+        assert_eq!(topics.len(), 3);
+    }
+
+    #[test]
+    fn test_cancel_admin_change_emits_event() {
+        let f = Fixture::setup();
+        let new_admin = Address::generate(&f.env);
+        let multisig = Address::generate(&f.env);
+
+        f.client().propose_admin_change(&f.admin, &new_admin);
+
+        f.client().cancel_admin_change(&multisig);
+
+        let events = f.env.events().all();
+        let event = events.last().unwrap();
+        
+        // Verify event has correct topic structure
+        let topics = &event.topics;
+        assert_eq!(topics.len(), 3);
     }
 }
