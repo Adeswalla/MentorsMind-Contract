@@ -7,16 +7,14 @@ use shared::pause_guard::require_not_paused;
 use shared::{
     action_claim, action_stake, action_unstake, apply_bps_multiplier, assess_token_velocity,
     compute_checksum, compute_early_unstake_penalty, compute_reward_multiplier_bps,
-    correlate_attack_vectors, detect_suspicious_pattern, push_snapshot_index,
-    validate_amount_limits, exceeds_extraction_rate, detect_coordinated_timing,
-    EconomicVelocityReport, MultiVectorThreatReport, PenaltyCalculation,
-    ReentrancyGuard, RewardLockup, RollbackProposal, SafeMath, SnapshotMeta, StakeRecord,
-    StakedEventData, StakingActionRecord, StateSnapshot, StateVerificationReport,
-    SuspiciousPatternFlag, Validator, EMERGENCY_THRESHOLD, MAX_SNAPSHOTS,
-    MIN_STAKING_DURATION_SECS, PATTERN_DETECTION_WINDOW, REWARD_LOCKUP_SECS,
-    REWARD_MULTIPLIER_MIN_BPS, MIN_POSITION_DELTA_SECS,
-    CollusionDetection, GameTheoryState, IncentiveCompatibilityResult, TokenomicsAuditResult,
-    Pagination,
+    correlate_attack_vectors, detect_coordinated_timing, detect_suspicious_pattern,
+    exceeds_extraction_rate, push_snapshot_index, validate_amount_limits, CollusionDetection,
+    EconomicVelocityReport, GameTheoryState, IncentiveCompatibilityResult, MultiVectorThreatReport,
+    Pagination, PenaltyCalculation, ReentrancyGuard, RewardLockup, RollbackProposal, SafeMath,
+    SnapshotMeta, StakeRecord, StakedEventData, StakingActionRecord, StateSnapshot,
+    StateVerificationReport, SuspiciousPatternFlag, TokenomicsAuditResult, Validator,
+    EMERGENCY_THRESHOLD, MAX_SNAPSHOTS, MIN_POSITION_DELTA_SECS, MIN_STAKING_DURATION_SECS,
+    PATTERN_DETECTION_WINDOW, REWARD_LOCKUP_SECS, REWARD_MULTIPLIER_MIN_BPS,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, BytesN, Env,
@@ -2405,6 +2403,42 @@ impl StakingContract {
         total
     }
 
+    /// Paginated reward history view for a staker. Returns a page of RewardLockup
+    /// entries representing each epoch's reward distribution, lockup, and claim status.
+    /// `limit` is clamped to `MAX_PAGE_SIZE`. Offset and limit follow standard pagination
+    /// semantics over the staker's complete reward history (epoch 0..current_epoch).
+    pub fn get_reward_history_page(
+        env: Env,
+        staker: Address,
+        offset: u32,
+        limit: u32,
+    ) -> soroban_sdk::Vec<RewardLockup> {
+        use shared::Pagination;
+
+        let current_epoch: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EpochId)
+            .unwrap_or(0);
+
+        let total_epochs = current_epoch as u32;
+        let (start, end) = Pagination::bounds(total_epochs, offset, limit);
+
+        let mut result = soroban_sdk::Vec::new(&env);
+
+        for epoch in start..end {
+            if let Some(lockup) = env
+                .storage()
+                .persistent()
+                .get::<_, RewardLockup>(&DataKey::StakerRewardLockup(staker.clone(), epoch as u64))
+            {
+                result.push_back(lockup);
+            }
+        }
+
+        result
+    }
+
     /// Duration-based multiplier the staker would earn for a reward
     /// materialised *right now*, given their current live stake duration.
     pub fn get_reward_multiplier_bps(env: Env, staker: Address) -> u32 {
@@ -3068,8 +3102,10 @@ impl StakingContract {
     /// Monitor governance token accumulation to prevent vote manipulation
     pub fn monitor_governance_accumulation(env: Env, staker: Address) -> Result<u32, Error> {
         let total_staked = Self::get_total_staked(env.clone());
-        let staker_stake: Option<StakeRecord> =
-            env.storage().persistent().get(&DataKey::Stake(staker.clone()));
+        let staker_stake: Option<StakeRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Stake(staker.clone()));
 
         if let Some(stake_record) = staker_stake {
             let accumulation_bps = if total_staked > 0 {
@@ -3377,10 +3413,7 @@ impl StakingContract {
     }
 
     /// Detect coordinated staking patterns that suggest manipulation.
-    pub fn detect_staking_coordination(
-        env: Env,
-        staker: Address,
-    ) -> bool {
+    pub fn detect_staking_coordination(env: Env, staker: Address) -> bool {
         let action_log: Vec<u64> = env
             .storage()
             .persistent()
@@ -3410,10 +3443,7 @@ impl StakingContract {
     }
 
     /// Audit tokenomics fairness for a given epoch.
-    pub fn audit_epoch_fairness(
-        env: Env,
-        epoch: u64,
-    ) -> TokenomicsAuditResult {
+    pub fn audit_epoch_fairness(env: Env, epoch: u64) -> TokenomicsAuditResult {
         let epoch_reward: i128 = env
             .storage()
             .persistent()
@@ -4107,13 +4137,12 @@ mod test {
         client.initialize(&admin, &token_id, &None);
 
         client.stake(&mentor, &100, &30);
-        let mut index: Vec<u32> = env
-            .as_contract(&staking_id, || {
-                env.storage()
-                    .persistent()
-                    .get(&DataKey::StakeSnapshotIndex)
-                    .unwrap()
-            });
+        let mut index: Vec<u32> = env.as_contract(&staking_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::StakeSnapshotIndex)
+                .unwrap()
+        });
         assert_eq!(index.len(), 1);
         assert_eq!(index.get(0), Some(1));
 
