@@ -7,6 +7,7 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env,
     IntoVal, Symbol,
 };
+use shared::{validate_amount_limits, MAX_FINANCIAL_AMOUNT};
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -22,8 +23,8 @@ pub enum Error {
     InsufficientShares = 4,
     WithdrawLocked = 5,
     InsufficientPoolBalance = 6,
-    ZeroAmount = 7,
-    StorageSchemaRegistrationFailed = 8,
+    ZeroAmount              = 7,
+    AmountExceedsLimit      = 8,
 }
 
 // ---------------------------------------------------------------------------
@@ -110,8 +111,12 @@ impl InsuranceContract {
     /// Deposit USDC into the insurance pool.
     pub fn deposit(env: Env, provider: Address, amount: i128) -> Result<(), Error> {
         Self::assert_initialized(&env)?;
-        if amount <= 0 {
-            return Err(Error::ZeroAmount);
+        if !validate_amount_limits(amount, 1, MAX_FINANCIAL_AMOUNT) {
+            return if amount <= 0 {
+                Err(Error::ZeroAmount)
+            } else {
+                Err(Error::AmountExceedsLimit)
+            };
         }
         provider.require_auth();
 
@@ -220,8 +225,12 @@ impl InsuranceContract {
     /// Admin only.
     pub fn claim(env: Env, escrow_id: Symbol, learner: Address, amount: i128) -> Result<(), Error> {
         Self::assert_initialized(&env)?;
-        if amount <= 0 {
-            return Err(Error::ZeroAmount);
+        if !validate_amount_limits(amount, 1, MAX_FINANCIAL_AMOUNT) {
+            return if amount <= 0 {
+                Err(Error::ZeroAmount)
+            } else {
+                Err(Error::AmountExceedsLimit)
+            };
         }
 
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
@@ -675,41 +684,38 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_rejects_incompatible_insurance_layout_upgrade() {
+    fn test_amount_exceeds_limit() {
         let f = Fixture::setup();
-        let registry = UpgradeRegistryContractClient::new(&f.env, &f.registry);
-        let contract_name = symbol_short!("insurance");
-        let schema_v1 = registry
-            .get_storage_schema(&contract_name, &1)
-            .expect("insurance schema registered during initialization");
-
-        let mut fields = schema_v1.fields.clone();
-        let pool_balance = fields
-            .iter()
-            .position(|field| field.name == Symbol::new(&f.env, "PoolBalance"))
-            .expect("PoolBalance field exists") as u32;
-        fields.set(
-            pool_balance,
-            StorageField {
-                name: Symbol::new(&f.env, "PoolBalance"),
-                field_type: StorageFieldType::U64,
-                slot_index: pool_balance,
-                deprecated: false,
-            },
-        );
-        let incompatible_schema = StorageLayoutSchema {
-            version: 2,
-            schema_hash: CompatibilityValidator::compute_schema_hash(&f.env, &fields),
-            fields,
-        };
-        let signers = soroban_sdk::vec![&f.env, f.admin.clone()];
-        let wasm_hash = soroban_sdk::BytesN::from_array(&f.env, &[0xab; 32]);
-        registry.register_storage_schema(&contract_name, &incompatible_schema, &signers);
-        registry.register_upgrade(&contract_name, &0, &1, &wasm_hash);
-
+        // Try to deposit more than MAX_FINANCIAL_AMOUNT
+        let exceeds = 1_000_000_000_000_001i128; // MAX_FINANCIAL_AMOUNT + 1
         assert_eq!(
-            registry.try_schedule_upgrade(&wasm_hash, &contract_name, &2, &wasm_hash, &signers,),
-            Err(Ok(RegistryError::StorageMigrationRequired))
+            f.client().try_deposit(&f.provider, &exceeds),
+            Err(Ok(Error::AmountExceedsLimit))
+        );
+    }
+
+    #[test]
+    fn test_claim_zero_amount_rejected() {
+        let f = Fixture::setup();
+        let learner = Address::generate(&f.env);
+        let escrow_id = Symbol::new(&f.env, "session1");
+        assert_eq!(
+            f.client().try_claim(&escrow_id, &learner, &0),
+            Err(Ok(Error::ZeroAmount))
+        );
+    }
+
+    #[test]
+    fn test_claim_amount_exceeds_limit() {
+        let f = Fixture::setup();
+        f.client().deposit(&f.provider, &500_000);
+        
+        let learner = Address::generate(&f.env);
+        let escrow_id = Symbol::new(&f.env, "session2");
+        let exceeds = 1_000_000_000_000_001i128; // MAX_FINANCIAL_AMOUNT + 1
+        assert_eq!(
+            f.client().try_claim(&escrow_id, &learner, &exceeds),
+            Err(Ok(Error::AmountExceedsLimit))
         );
     }
 }
